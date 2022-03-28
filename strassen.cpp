@@ -1,16 +1,25 @@
-#include <array>
-#include <chrono>
+#include <algorithm>
 #include <fstream>
-#include <functional>
 #include <iostream>
 #include <memory>
-#include <ostream>
 #include <sstream>
-#include <tuple>
 #include <vector>
+
+enum debug_flags {
+    RANDOM = 0x01,  // should generate random instead of reading from a file
+    PRINT = 0x02,   // print matrices to the screen
+    TIME = 0x04,    // display the time
+    VERIFY = 0x08,  // verify the matrix multiplication
+};
 
 static int usage() {
     std::cerr << "      Usage: ./strassen [DEBUG] [DIMENSION] [INPUT]\n";
+    std::cerr << "          debug flags:\n";
+    std::cerr << "              RANDOM: " << debug_flags::RANDOM << "\n";
+    std::cerr << "              PRINT: " << debug_flags::PRINT << "\n";
+    std::cerr << "              TIME: " << debug_flags::TIME << "\n";
+    std::cerr << "              VERIFY: " << debug_flags::VERIFY << "\n";
+
     return -1;
 }
 
@@ -24,69 +33,91 @@ static int to_int(std::string str) {
     return res;
 }
 
-struct global_stats {
-    long multiplications;
-    long additions;
-    long ints_allocated;
-};
-static global_stats stats;
-
-struct matrix_data {
+// Represents a two dimension set of integers
+class matrix_data {
+   public:
+    int dimension;
     std::shared_ptr<std::vector<int>> data;
-    int N;
+
+    matrix_data(int dimension) : dimension(dimension) {
+        data = std::make_shared<std::vector<int>>(dimension * dimension, 0);
+    }
+
+    int get(int i, int j) const { return data->at(i + dimension * j); }
+
+    int& at(int i, int j) { return data->at(i + dimension * j); }
+    int& at(int i) { return data->at(i); }
 };
 
-inline int ceil_divide(int x) { return x / 2 + (x % 2 != 0); }
-
-struct matrix {
-    int i, j;
-    int n;
-    matrix_data data;
-
-    matrix(int N) {
+// Represents a submatrix which points to some two dimensional block of data
+class submatrix {
+   public:
+    submatrix(matrix_data data) : data(data) {
         i = 0;
         j = 0;
-        n = N;
 
-        data.data = std::make_shared<std::vector<int>>(N * N);
-        data.N = N;
+        dimension = data.dimension;
+    };
 
-        stats.ints_allocated += N * N;
+    matrix_data data;
+    int i, j, dimension;
+
+    // Garbage variable for use in 'at()' method
+    int padding = 0;
+
+    int& at(int x, int y) {
+        if (x < 0 || x >= dimension || y < 0 || y >= dimension) {
+            padding = 0;
+            return padding;
+        }
+        return data.at(x + i, y + j);
     }
 
-    matrix() {}
+    bool operator==(const submatrix& other) const {
+        if (dimension != other.dimension) return false;
 
-    matrix sub(int x, int y) {
-        matrix submatrix;
-
-        submatrix.data = data;
-        submatrix.n = ceil_divide(n);
-
-        submatrix.i = i + x * submatrix.n;
-        submatrix.j = j + y * submatrix.n;
-
-        return submatrix;
-    }
-
-    inline int at(int x, int y) const {
-        if (x + i < data.N && y + j < data.N) {
-            return data.data->at(x + i + data.N * (y + j));
+        for (int x = 0; x < other.dimension; ++x) {
+            for (int y = 0; y < other.dimension; ++y) {
+                if (data.get(x, y) != other.data.get(x, y)) return false;
+            }
         }
 
-        return 0;
-    }
-
-    inline void set(int x, int y, int value) {
-        if (x + i < data.N && y + j < data.N) {
-            data.data->at(x + i + data.N * (y + j)) = value;
-        }
+        return true;
     }
 };
 
-std::ostream& operator<<(std::ostream& os, const matrix& mat) {
-    for (int x = 0; x < mat.n; ++x) {
-        for (int y = 0; y < mat.n; ++y) {
-            os << mat.at(x, y) << " ";
+// Submatrix addition with data target
+//  assumes that 'c' is cleared
+void sum(submatrix a, submatrix b, submatrix c) {
+    int dimension = std::min(a.dimension, b.dimension);
+    assert(dimension <= c.dimension);
+
+    for (int j = 0; j < dimension; ++j) {
+        for (int i = 0; i < dimension; ++i) {
+            c.at(i, j) = a.at(i, j) + b.at(i, j);
+        }
+    }
+}
+
+void linear_mul(submatrix a, submatrix b, submatrix c) {
+    int dimension = std::max(a.dimension, b.dimension);
+    assert(dimension <= c.dimension);
+
+    for (int k = 0; k < dimension; ++k) {
+        for (int i = 0; i < dimension; ++i) {
+            int r = a.at(i, k);
+            for (int j = 0; j < dimension; ++j) {
+                c.at(i, j) += r * b.at(k, j);
+            }
+        }
+    }
+}
+
+// Overloaded print operator
+std::ostream& operator<<(std::ostream& os, submatrix m) {
+    for (int x = 0; x < m.dimension; ++x) {
+        for (int y = 0; y < m.dimension; ++y) {
+            os << m.at(x + m.i, y + m.j) << " ";
         }
         os << "\n";
     }
@@ -95,180 +126,66 @@ std::ostream& operator<<(std::ostream& os, const matrix& mat) {
 }
 
 int main(int argc, const char** argv) {
-    // Validate inputs
-    if (argc == 4) {
-        std::vector<std::string> args(argv + 1, argv + argc);
+    if (argc != 4) return usage();
 
-        int debug = to_int(args.at(0));
-        int dimension = to_int(args.at(1));
-        int cutoff = 1;
+    std::vector<std::string> args(argv + 1, argv + argc);
 
-        if (dimension > 0) {
-            // Allocate matrices
-            matrix a(dimension);
-            matrix b(dimension);
+    // Parse input parameters
+    int debug = to_int(args.at(0));
+    int dimension = to_int(args.at(1));
+    int cutoff = 1;
 
-            if ((debug & 0x01) != 0) {
-                srand(time(NULL));
-                for (int i = 0; i < dimension; ++i) {
-                    for (int j = 0; j < dimension; ++j) {
-                        a.set(i, j, rand() % 2);
-                    }
-                }
-                for (int i = 0; i < dimension; ++i) {
-                    for (int j = 0; j < dimension; ++j) {
-                        b.set(i, j, rand() % 2);
-                    }
-                }
-                cutoff = to_int(args.at(2));
-            } else {
-                // Read data from file
-                std::string line;
-                std::ifstream file(args.at(2));
+    if (dimension <= 0) return usage();
 
-                if (file.is_open()) {
-                    int i = 0;
-                    while (getline(file, line)) {
-                        if (i < dimension * dimension) {
-                            a.data.data->at(i) = to_int(line);
-                        } else {
-                            b.data.data->at(i - dimension * dimension) =
-                                to_int(line);
-                        }
-                        ++i;
-                    }
-                    file.close();
+    // Allocate input matrices
+    matrix_data a(dimension);
+    matrix_data b(dimension);
+    matrix_data c(dimension);
+
+    if ((debug & debug_flags::RANDOM) != 0) {
+        // Randomly populate matrices instead of reading from file
+        srand(time(NULL));
+        for (int i = 0; i < dimension * dimension; ++i) {
+            a.at(i) = rand() % 2;
+            b.at(i) = rand() % 2;
+        }
+        cutoff = to_int(args.at(2));
+    } else {
+        // Read data from file
+        std::string line;
+        std::ifstream file(args.at(2));
+
+        if (file.is_open()) {
+            int i = 0;
+            while (getline(file, line)) {
+                if (i < dimension * dimension) {
+                    a.at(i) = to_int(line);
                 } else {
-                    // Error handling
-                    std::cerr << "      Unable to open file: \"" << args.at(2)
-                              << "\"" << std::endl;
-                    return -1;
+                    b.at(i - dimension * dimension) = to_int(line);
                 }
+                ++i;
             }
-
-            using matrix_operation =
-                std::function<void(matrix, matrix, matrix)>;
-
-            matrix_operation sum;
-            sum = [&](matrix a, matrix b, matrix c) {
-                for (int y = 0; y < c.n; ++y) {
-                    for (int x = 0; x < c.n; ++x) {
-                        c.set(x, y, a.at(x, y) + b.at(x, y));
-                        ++stats.additions;
-                    }
-                }
-            };
-
-            matrix_operation sub;
-            sub = [&](matrix a, matrix b, matrix c) {
-                for (int y = 0; y < c.n; ++y) {
-                    for (int x = 0; x < c.n; ++x) {
-                        c.set(x, y, a.at(x, y) - b.at(x, y));
-                        ++stats.additions;
-                    }
-                }
-            };
-
-            matrix_operation mul;
-            mul = [&](matrix a, matrix b, matrix c) {
-                assert(a.n == b.n && b.n == c.n);
-
-                if (c.n <= cutoff) {
-                    for (int x = 0; x < c.n; ++x) {
-                        for (int y = 0; y < c.n; ++y) {
-                            for (int z = 0; z < c.n; ++z) {
-                                c.set(x, y,
-                                      c.at(x, y) + a.at(x, z) * b.at(z, y));
-                                ++stats.additions;
-                                ++stats.multiplications;
-                            }
-                        }
-                    }
-                } else {
-                    int m = ceil_divide(c.n);
-                    matrix sum0(m);
-                    matrix sum1(m);
-
-                    // Calculate smaller products
-                    matrix m0(m);
-                    sum(a.sub(0, 0), a.sub(1, 1), sum0);
-                    sum(b.sub(0, 0), b.sub(1, 1), sum1);
-                    mul(sum0, sum1, m0);
-
-                    matrix m1(m);
-                    sum(a.sub(1, 0), a.sub(1, 1), sum0);
-                    mul(sum0, b.sub(0, 0), m1);
-
-                    matrix m2(m);
-                    sub(b.sub(0, 1), b.sub(1, 1), sum1);
-                    mul(a.sub(0, 0), sum1, m2);
-
-                    matrix m3(m);
-                    sub(b.sub(1, 0), b.sub(0, 0), sum1);
-                    mul(a.sub(1, 1), sum1, m3);
-
-                    matrix m4(m);
-                    sum(a.sub(0, 0), a.sub(0, 1), sum0);
-                    mul(sum0, b.sub(1, 1), m4);
-
-                    matrix m5(m);
-                    sub(a.sub(1, 0), a.sub(0, 0), sum0);
-                    sum(b.sub(0, 0), b.sub(0, 1), sum1);
-                    mul(sum0, sum1, m5);
-
-                    matrix m6(m);
-                    sub(a.sub(0, 1), a.sub(1, 1), sum0);
-                    sum(b.sub(1, 0), b.sub(1, 1), sum1);
-                    mul(sum0, sum1, m6);
-
-                    // Use products to compute total product
-                    matrix c00 = c.sub(0, 0);
-                    matrix c10 = c.sub(1, 0);
-                    matrix c01 = c.sub(0, 1);
-                    matrix c11 = c.sub(1, 1);
-
-                    sum(m0, m3, c00);
-                    sum(c00, m6, c00);
-                    sub(c00, m4, c00);
-                    sum(m2, m4, c01);
-                    sum(m1, m3, c10);
-                    sum(m0, m2, c11);
-                    sum(c11, m5, c11);
-                    sub(c11, m1, c11);
-                }
-            };
-
-            auto start = std::chrono::high_resolution_clock::now();
-            matrix c(dimension);
-            mul(a, b, c);
-            auto end = std::chrono::high_resolution_clock::now();
-
-            if ((debug & 0x04) != 0) {
-                std::cout
-                    << std::chrono::duration_cast<std::chrono::milliseconds>(
-                           end - start)
-                           .count()
-                    << std::endl;
-            }
-
-            if ((debug & 0x02) != 0) {
-                std::cout << "A:\n" << a;
-                std::cout << "B:\n" << b;
-                std::cout << "C:\n" << c;
-            }
-
-            stats.ints_allocated -= 3 * dimension * dimension;
-
-            if ((debug & 0x08) != 0) {
-                std::cout << "additions: " << stats.additions << '\n';
-                std::cout << "multiplications: " << stats.multiplications
-                          << '\n';
-                std::cout << "ints_allocated: " << stats.ints_allocated << '\n';
-            }
-
-            return 0;
+            file.close();
+        } else {
+            // Error handling
+            std::cerr << "      Unable to open file: \"" << args.at(2) << "\""
+                      << std::endl;
+            return -1;
         }
     }
 
-    return usage();
+    // Perform the multiplications
+    linear_mul(a, b, c);
+
+    if ((debug & debug_flags::PRINT) != 0) {
+        std::cout << "A:\n" << a;
+        std::cout << "B:\n" << b;
+        std::cout << "C:\n" << c;
+    }
+
+    if ((debug & debug_flags::VERIFY) != 0) {
+        matrix_data check(dimension);
+        linear_mul(a, b, check);
+        assert(submatrix(c) == submatrix(check));
+    }
 }
