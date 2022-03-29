@@ -19,6 +19,7 @@ static int usage() {
     std::cerr << "              RANDOM      :" << debug_flags::RANDOM << "\n";
     std::cerr << "              PRINT       :" << debug_flags::PRINT << "\n";
     std::cerr << "              VERIFY      :" << debug_flags::VERIFY << "\n";
+    std::cerr << "              TIME        :" << debug_flags::TIME << "\n";
 
     return -1;
 }
@@ -186,13 +187,11 @@ void linear_mul(submatrix a, submatrix b, submatrix c) {
     }
 }
 
-void strassen_mul(submatrix a, submatrix b, submatrix c, int cutoff) {
+void strassen_mul(submatrix a, submatrix b, submatrix c,
+                  submatrix scratch_space, int cutoff) {
     int dimension = c.dimension;
     a.dimension = dimension;
     b.dimension = dimension;
-
-    // Scratch space
-    matrix_data scratch_space(dimension);
 
     std::function<void(submatrix, submatrix, submatrix, submatrix)>
         strassen_mul_recursion;
@@ -279,9 +278,9 @@ void strassen_mul(submatrix a, submatrix b, submatrix c, int cutoff) {
 }
 
 int main(int argc, const char** argv) {
-    if (argc != 4) return usage();
-
     std::vector<std::string> args(argv + 1, argv + argc);
+
+    if (argc != 4) return usage();
 
     // Parse input parameters
     int debug = to_int(args.at(0));
@@ -327,11 +326,12 @@ int main(int argc, const char** argv) {
     }
 
     matrix_data c_padded(padding_size(dimension, cutoff));
+    matrix_data scratch_space(c_padded.dimension);
     submatrix c(c_padded);
     c.dimension = dimension;
 
     // Perform the multiplications
-    auto task = [&]() { strassen_mul(a, b, c_padded, cutoff); };
+    auto task = [&]() { strassen_mul(a, b, c_padded, scratch_space, cutoff); };
     if ((debug & debug_flags::TIME) != 0) {
         std::cout << "strassen: ";
         time(task);
