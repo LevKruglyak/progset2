@@ -72,9 +72,9 @@ class matrix_data {
         return i >= 0 && j >= 0 && i + dimension * j < int(data->size());
     }
 
-    int get(int i, int j) const { return data->at(i + dimension * j); }
+    int get(int i, int j) const { return data->at(j + dimension * i); }
 
-    int& at(int i, int j) { return data->at(i + dimension * j); }
+    int& at(int i, int j) { return data->at(j + dimension * i); }
     int& at(int i) { return data->at(i); }
 };
 
